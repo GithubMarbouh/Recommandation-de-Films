@@ -1,84 +1,62 @@
 import numpy as np
 import pandas as pd
-from django.db import models
-import scipy.optimize
+from sklearn.model_selection import train_test_split
+from tensorflow.keras.models import Model
+from tensorflow.keras.layers import Input, Embedding, Flatten, Dot, Add, Dense
+from tensorflow.keras.optimizers import Adam
 from titleApp.models import Myrating
-from titleApp.models import TitleMovie
-
-if (TitleMovie.watched==True):
-    Myrating.rating=2+Myrating.rating
-if (TitleMovie.liked==True):
-    Myrating.rating=+Myrating.rating
-if (TitleMovie.bookmark==True):
-    Myrating.rating=+Myrating.rating
 
 
-def Myrecommend():
-    def normalizeRatings(myY, myR):
-        # The mean is only counting movies that were rated
-        Ymean = np.sum(myY, axis=1) / np.sum(myR, axis=1)
-        Ymean = Ymean.reshape((Ymean.shape[0],1))
-        return myY - Ymean, Ymean
-
-    def flattenParams(myX, myTheta):
-        return np.concatenate((myX.flatten(), myTheta.flatten()))
-
-    def reshapeParams(flattened_XandTheta, mynm, mynu, mynf):
-        assert flattened_XandTheta.shape[0] == int(mynm * mynf + mynu * mynf)
-        reX = flattened_XandTheta[:int(mynm * mynf)].reshape((mynm, mynf))
-        reTheta = flattened_XandTheta[int(mynm * mynf):].reshape((mynu, mynf))
-        return reX, reTheta
-
-    def cofiCostFunc(myparams, myY, myR, mynu, mynm, mynf, mylambda=0.):
-        myX, myTheta = reshapeParams(myparams, mynm, mynu, mynf)
-        term1 = myX.dot(myTheta.T)
-        term1 = np.multiply(term1, myR)
-        cost = 0.5 * np.sum(np.square(term1 - myY))
-        # for regularization
-        cost += (mylambda / 2.) * np.sum(np.square(myTheta))
-        cost += (mylambda / 2.) * np.sum(np.square(myX))
-        return cost
-
-    def cofiGrad(myparams, myY, myR, mynu, mynm, mynf, mylambda=0.):
-        myX, myTheta = reshapeParams(myparams, mynm, mynu, mynf)
-        term1 = myX.dot(myTheta.T)
-        term1 = np.multiply(term1, myR)
-        term1 -= myY
-        Xgrad = term1.dot(myTheta)
-        Thetagrad = term1.T.dot(myX)
-        # Adding Regularization
-        Xgrad += mylambda * myX
-        Thetagrad += mylambda * myTheta
-        return flattenParams(Xgrad, Thetagrad)
-
+def get_data():
     df = pd.DataFrame(list(Myrating.objects.all().values()))
-    mynu = df.user_id.unique().shape[0]
-    mynm = df.movie_id.unique().shape[0]
-    mynf = 10
-    Y = np.zeros((mynm, mynu))
-    for row in df.itertuples():
-        Y[row[2] - 1, row[4] - 1] = row[3]
-    R = np.zeros((mynm, mynu))
-    for i in range(Y.shape[0]):
-        for j in range(Y.shape[1]):
-            if Y[i][j] != 0:
-                R[i][j] = 1
-
-    Ynorm, Ymean = normalizeRatings(Y, R)
-    X = np.random.rand(mynm, mynf)
-    Theta = np.random.rand(mynu, mynf)
-    myflat = flattenParams(X, Theta)
-    mylambda = 12.2
-    result = scipy.optimize.fmin_cg(cofiCostFunc, x0=myflat, fprime=cofiGrad, args=(Y, R, mynu, mynm, mynf, mylambda),
-                                    maxiter=40, disp=True, full_output=True)
-    resX, resTheta = reshapeParams(result[0], mynm, mynu, mynf)
-    prediction_matrix = resX.dot(resTheta.T)
-    return prediction_matrix, Ymean
+    user_ids = df.user_id.unique()
+    movie_ids = df.movie_id.unique()
+    user_id_map = {id: i for i, id in enumerate(user_ids)}
+    movie_id_map = {id: i for i, id in enumerate(movie_ids)}
+    df['user_id'] = df['user_id'].map(user_id_map)
+    df['movie_id'] = df['movie_id'].map(movie_id_map)
+    return df, len(user_ids), len(movie_ids)
 
 
+def create_model(num_users, num_movies, embedding_size=50):
+    user_input = Input(shape=(1,))
+    user_embedding = Embedding(num_users, embedding_size)(user_input)
+    user_vec = Flatten()(user_embedding)
+
+    movie_input = Input(shape=(1,))
+    movie_embedding = Embedding(num_movies, embedding_size)(movie_input)
+    movie_vec = Flatten()(movie_embedding)
+
+    dot_product = Dot(axes=1)([user_vec, movie_vec])
+
+    model = Model([user_input, movie_input], dot_product)
+    model.compile(optimizer=Adam(lr=0.001), loss='mean_squared_error')
+    return model
 
 
+def train_model():
+    df, num_users, num_movies = get_data()
+    X = df[['user_id', 'movie_id']].values
+    y = df['rating'].values
+
+    X_train, X_val, y_train, y_val = train_test_split(X, y, test_size=0.2, random_state=42)
+
+    model = create_model(num_users, num_movies)
+    model.fit([X_train[:, 0], X_train[:, 1]], y_train, epochs=10, validation_data=([X_val[:, 0], X_val[:, 1]], y_val))
+
+    return model
 
 
+def make_predictions(user_id, movie_id, model):
+    user_data = np.array([user_id])
+    movie_data = np.array([movie_id])
+    prediction = model.predict([user_data, movie_data])
+    return prediction[0][0]
 
+
+# Example usage
+update_ratings()
+model = train_model()
+prediction = make_predictions(user_id=1, movie_id=1, model=model)
+print(f"Predicted rating for user 1 and movie 1: {prediction}")
 
